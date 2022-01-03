@@ -1,93 +1,124 @@
 #![allow(clippy::too_many_lines)]
-// #![allow(unreachable_code)]
-// #![allow(unused_variables)]
-// #![allow(unused_mut)]
 
 use core::panic;
 use git2::{IntoCString, Repository};
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, env, ffi::OsStr, fs, io, path::Path, process::Command};
 
-const MACOSX_DEPLOYMENT_TARGET: &str = "12.0"; //empty string means get the latest version from system
+const MACOSX_DEPLOYMENT_TARGET: &str = "12.0"; // empty string means get the latest version from system
 
 enum BuildType {
     Cmake = 0,
-    Make,
-    Shell,
+    Make = 1,
+    Shell = 2,
+}
+enum LibraryType {
+    Static,
+    Dynamic,
 }
 
-type BuildConfig = (
-    BuildType,                 /* build type */
-    &'static str,              /* git url */
-    &'static str,              /* relative path to the CMake file from root of it's repository*/
-    Vec<&'static str>,         /* CMake configures */
-    bool,         /* true means linking static library, false means linking dynamic library*/
-    &'static str, /* relative path to the cxx files */
-    &'static str, /* relative path to the rust file related to cxx */
-    &'static str, /* prefix path to the libs & includes (will be used for MakeFile) */
-    Vec<(&'static str, bool)>, /* paths to the dependencies libraries. when bool is true, means STATIC Linking  */
-);
+struct Dependency {
+    pub name: String,
+    pub library_type: LibraryType,
+}
 
-fn main() {
-    let mut git_sources: HashMap<&str, BuildConfig> = HashMap::new();
-    let _r = git_sources.insert(
-        "lz4",
-        (
-            BuildType::Cmake,
-            "https://github.com/lz4/lz4.git",
-            "build/cmake/",
-            ["-DBUILD_SHARED_LIBS=FALSE", "-DBUILD_STATIC_LIBS=TRUE"].to_vec(),
-            true,
-            "src/compression/cxx/lz4/",
-            "src/compression/lz4.rs",
-            "",
-            [].to_vec(),
-        ),
-    );
-    let _r = git_sources.insert(
-        "lzma",
-        (
-            BuildType::Cmake,
-            "https://github.com/WolfEngine/lzma.git",
-            "",
-            [].to_vec(),
-            true,
-            "src/compression/cxx/lzma/",
-            "src/compression/lzma.rs",
-            "",
-            [].to_vec(),
-        ),
-    );
+struct BuildConfig {
+    pub name: String,
+    pub git_url: String,
+    pub build_type: BuildType,
+    pub library_type: LibraryType,
+    pub make_file_path_prefix: String,
+    pub dependencies: Vec<Dependency>,
+    pub relative_path_to_cxx_file: String,
+    pub cmake_configurations: Vec<String>,
+    pub relative_path_to_cmake_file: String,
+    pub relative_path_to_rust_related_cxx_file: String,
+}
 
-    let lua_lib_name: &str;
-    let build_type: BuildType;
-    let deps: Vec<(&'static str, bool)>;
-    if cfg!(windows) {
-        lua_lib_name = "luajit";
-        deps = [("lua51", true)].to_vec(); //link lua51 as static
-        build_type = BuildType::Shell;
-    } else {
-        lua_lib_name = "luajit-5.1";
-        deps = [].to_vec();
-        build_type = BuildType::Make;
-    };
+struct Builder {
+    sources: Vec<BuildConfig>,
+}
+impl Builder {
+    // Bare empty initilization
+    pub fn new(elements_length: usize) -> Builder {
+        Builder {
+            sources: Vec::with_capacity(elements_length),
+        }
+    }
 
-    let _r = git_sources.insert(
-        lua_lib_name,
-        (
+    pub fn push(&mut self, config: BuildConfig) {
+        self.sources.push(config);
+    }
+
+    pub fn initilize_sources(&self) {
+        // Lz4
+        self.push(BuildConfig {
+            name: String::from("lz4"),
+            build_type: BuildType::Cmake,
+            dependencies: Vec::new(),
+            library_type: LibraryType::Static,
+            make_file_path_prefix: String::new(),
+            git_url: String::from("https://github.com/lz4/lz4.git"),
+            relative_path_to_cmake_file: String::from("build/cmake/"),
+            relative_path_to_cxx_file: String::from("src/compression/cxx/lz4/"),
+            relative_path_to_rust_related_cxx_file: String::from("src/compression/lz4.rs"),
+            cmake_configurations: vec![
+                String::from("-DBUILD_SHARED_LIBS=FALSE"),
+                String::from("-DBUILD_STATIC_LIBS=TRUE"),
+            ],
+        });
+
+        // Lzma
+        self.push(BuildConfig {
+            name: String::from("lzma"),
+            build_type: BuildType::Cmake,
+            dependencies: Vec::new(),
+            cmake_configurations: Vec::new(),
+            library_type: LibraryType::Static,
+            make_file_path_prefix: String::new(),
+            relative_path_to_cmake_file: String::new(),
+            git_url: String::from("https://github.com/WolfEngine/lzma.git"),
+            relative_path_to_cxx_file: String::from("src/compression/cxx/lzma/"),
+            relative_path_to_rust_related_cxx_file: String::from("src/compression/lzma.rs"),
+        });
+
+        // Platform-specific value declareation
+        let lua_lib_name: &str;
+        let build_type: BuildType;
+        let dependencies: Vec<Dependency>;
+        if cfg!(windows) {
+            lua_lib_name = "luajit";
+            build_type = BuildType::Shell;
+
+            dependencies = vec![Dependency {
+                name: String::from("lua51"),
+                library_type: LibraryType::Static,
+            }];
+        } else {
+            dependencies = Vec::new();
+            lua_lib_name = "luajit-5.1";
+            build_type = BuildType::Make;
+        };
+
+        // LuaJIT
+        self.push(BuildConfig {
             build_type,
-            "https://github.com/LuaJIT/LuaJIT.git",
-            "",
-            [].to_vec(),
-            true,
-            "src/script/cxx/luaJIT/",
-            "src/script/lua.rs",
-            "/usr/local/",
-            deps,
-        ),
-    );
+            dependencies,
+            name: String::from(lua_lib_name),
+            cmake_configurations: Vec::new(),
+            library_type: LibraryType::Static,
+            relative_path_to_cmake_file: String::new(),
+            make_file_path_prefix: String::from("/usr/local/"),
+            git_url: String::from("https://github.com/LuaJIT/LuaJIT.git"),
+            relative_path_to_cxx_file: String::from("src/script/cxx/luaJIT/"),
+            relative_path_to_rust_related_cxx_file: String::from("src/script/lua.rs"),
+        });
+    }
+}
 
+fn start() {
     //first build proto buffers
-    let paths = std::fs::read_dir("./proto").expect("could not read from proto folder");
+    let paths = fs::read_dir("./proto").expect("could not read from proto folder");
+
     for path in paths {
         let p = path.unwrap().path();
         if let Some(extension) = p.extension() {
@@ -98,16 +129,19 @@ fn main() {
     }
 
     //get the current path
-    let current_dir_path = std::env::current_dir().expect("could not get current directory");
+    let current_dir_path = env::current_dir().expect("could not get current directory");
+
     let current_dir = current_dir_path
         .to_str()
         .expect("could not get a &str from current directory");
 
     //get current build profile
-    let profile_str = std::env::var("PROFILE").expect("Build failed: could not get PROFILE");
+    let profile_str = env::var("PROFILE").expect("Build failed: could not get PROFILE");
+
     //get opt_level
     let opt_level_str =
-        std::env::var("OPT_LEVEL").expect("Build failed: could not get OPT_LEVEL profile");
+        env::var("OPT_LEVEL").expect("Build failed: could not get OPT_LEVEL profile");
+
     //set cmake build config
     let build_profile = match &opt_level_str[..] {
         "0" => "Debug",
@@ -127,49 +161,53 @@ fn main() {
             }
         }
     };
+
     //get current target os
-    let target_os =
-        std::env::var("CARGO_CFG_TARGET_OS").expect("Build failed: could not get target OS");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Build failed: could not get target OS");
 
     // make sure set the necessery enviroment variables for OSX
     if target_os == "macos" {
         if MACOSX_DEPLOYMENT_TARGET.is_empty() {
-            let file = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist")
+            let file = fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist")
                 .expect("could not read SystemVersion.plist");
-            let cur = std::io::Cursor::new(file.as_bytes());
+
+            let cur = io::Cursor::new(file.as_bytes());
+
             let v = plist::Value::from_reader(cur).expect("could not read value from plist");
 
             let version = v
                 .as_dictionary()
                 .and_then(|d| d.get("ProductVersion")?.as_string())
                 .expect("SystemVersion.plist is not a dictionary");
-            std::env::set_var("MACOSX_DEPLOYMENT_TARGET", version);
+
+            env::set_var("MACOSX_DEPLOYMENT_TARGET", version);
         } else {
-            std::env::set_var("MACOSX_DEPLOYMENT_TARGET", MACOSX_DEPLOYMENT_TARGET);
+            env::set_var("MACOSX_DEPLOYMENT_TARGET", MACOSX_DEPLOYMENT_TARGET);
         }
     }
 
     // create vectors for storing rust & cxx sources
-    let mut rust_srcs: Vec<String> = Vec::new();
     let mut cxx_srcs: Vec<String> = Vec::new();
+    let mut rust_srcs: Vec<String> = Vec::new();
     let mut include_srcs: Vec<String> = Vec::new();
+    let mut lib_deps = Vec::<Dependency>::new();
     let mut lib_paths: HashMap<String, (String, bool)> = HashMap::new();
-    let mut lib_deps = Vec::<(&'static str, bool)>::new();
 
     // create deps folder
     make_folder(&format!("{}/deps/", current_dir));
 
     // iterate over git repositories
-    for (k, mut v) in git_sources {
-        //store deps libraries
-        lib_deps.append(&mut v.8);
+    for (k, source) in sources.iterator.iter_mut().enumerate() {
+        // store deps libraries
+        lib_deps.append(&mut source.make_file_path_prefix);
 
-        //check git project already exists
+        // check git project already exists
         let git_repo_path = format!("{}/deps/{}", current_dir, k);
 
-        let prefix_path = v.7;
+        let prefix_path = source.relative_path_to_rust_related_cxx_file;
+
         //path to the Cmake folder
-        let path_to_cmake_folder = v.2;
+        let path_to_cmake_folder = source.git_url;
 
         //git project just opened
         let path_to_lib = format!(
@@ -187,15 +225,18 @@ fn main() {
         let build = match Repository::open(git_repo_path.clone()) {
             Ok(_g) => !Path::new(&path_to_lib).exists(),
             Err(_e) =>
-            // try clone it again
+            // try cloning it again
             {
-                let url = v.1;
+                let url = source.git_url.clone();
+
                 if !url.is_empty() {
-                    let cloned = Repository::clone_recurse(v.1, git_repo_path.clone());
+                    let cloned = Repository::clone_recurse(url, git_repo_path.clone());
+
                     if cloned.is_err() {
-                        panic!("could not clone '{}' because: {:?}", v.1, cloned.err());
+                        panic!("could not clone '{}' because: {:?}", url, cloned.err());
                     }
                 }
+
                 true
             }
         };
@@ -203,26 +244,30 @@ fn main() {
         if build {
             match v.0 {
                 BuildType::Cmake => {
-                    build_cmake(build_profile, &git_repo_path, &v);
+                    build_cmake(build_profile, &git_repo_path, &source);
                 }
                 BuildType::Make => {
-                    build_make(build_profile, &opt_level_str, &git_repo_path, &v);
+                    build_make(build_profile, &opt_level_str, &git_repo_path, &source);
                 }
                 BuildType::Shell => {
-                    //build with custom shell script should be implement
+                    // build with custom shell script should be implement
+                    // Use unimplemented! macro from the std library if it's critical
                 }
             }
         }
 
         //link library static or dynamic
-        let link_static = v.4;
+        let link_static = source.cmake_configurations;
+
         //cxx src path
         let cxx_src_path = v.5;
+
         //store it for later
         cxx_srcs.push(cxx_src_path.to_string());
 
         //rust src path
         let rust_src_path = v.6;
+
         //store it for later
         rust_srcs.push(rust_src_path.to_string());
 
@@ -233,6 +278,7 @@ fn main() {
             "{}/{}build/{}/{}/include/",
             git_repo_path, path_to_cmake_folder, build_profile, prefix_path
         );
+
         include_srcs.push(path_to_include.to_string());
 
         //path to the libraries
@@ -241,6 +287,7 @@ fn main() {
 
     // build cxx lib
     let mut build_cxx = cxx_build::bridges(rust_srcs);
+
     //build_cxx.flag_if_supported("/std:c++latest");
     let _r = build_cxx.flag_if_supported("-std=c++17");
     let _r = build_cxx.flag_if_supported("-std=c17");
@@ -275,30 +322,27 @@ fn main() {
     // include all cxx files
     for iter in cxx_srcs {
         //include all c/cpp files
-        let _r = std::fs::read_dir(&iter).map(|paths| {
+        let _r = fs::read_dir(&iter).map(|paths| {
             for iter in paths {
-                match iter {
-                    Ok(path) => {
-                        let p = path.path();
-                        let ext = p
-                            .extension()
-                            .unwrap_or_else(|| std::ffi::OsStr::new(""))
-                            .to_ascii_lowercase();
-                        if p.is_file() {
-                            let file_path_os_string = p.into_os_string();
-                            let file_path_str = file_path_os_string.to_str().unwrap();
-                            println!("cargo:rerun-if-changed={}", file_path_str);
-                            if ext == "c"
-                                || ext == "cc"
-                                || ext == "cpp"
-                                || ext == "cxx"
-                                || ext == "c++"
-                            {
-                                let _r = build_cxx.file(Path::new(file_path_str));
-                            }
+                if let Ok(path) = iter {
+                    let p = path.path();
+
+                    let ext = p
+                        .extension()
+                        .unwrap_or_else(|| OsStr::new(""))
+                        .to_ascii_lowercase();
+
+                    if p.is_file() {
+                        let file_path_os_string = p.into_os_string();
+                        let file_path_str = file_path_os_string.to_str().unwrap();
+
+                        println!("cargo:rerun-if-changed={}", file_path_str);
+
+                        if ext == "c" || ext == "cc" || ext == "cpp" || ext == "cxx" || ext == "c++"
+                        {
+                            let _r = build_cxx.file(Path::new(file_path_str));
                         }
                     }
-                    Err(_e) => {}
                 }
             }
         });
@@ -307,6 +351,7 @@ fn main() {
     //include all includes from CMakes
     for iter in include_srcs {
         println!("cargo:rerun-if-changed={}", iter);
+
         let _r = build_cxx.include(Path::new(&iter));
     }
 
@@ -323,6 +368,7 @@ fn main() {
     for iter in lib_paths {
         println!("cargo:rerun-if-changed={}", iter.1 .0);
         println!("cargo:rustc-link-search=native={}", iter.1 .0);
+
         if iter.1 .1 {
             println!("cargo:rustc-link-lib=static={}", iter.0);
         } else {
@@ -335,24 +381,25 @@ fn main() {
 }
 
 fn build_cmake(p_cmake_build_type: &str, p_git_repo_path: &str, p_value: &BuildConfig) {
-    use std::process::Command;
-
     //get path to CMakeLists file
     let cmake_parent_path = format!("{}/{}", p_git_repo_path, p_value.2);
+
     //get cmake configs
     let cmake_config_args = &p_value.3;
 
     //check build folder
     let build_folder_str = format!("{}/build", cmake_parent_path);
     let build_folder_path = Path::new(&build_folder_str);
+
     if !build_folder_path.exists() {
-        std::fs::create_dir(build_folder_path).unwrap_or_else(|_| {
+        fs::create_dir(build_folder_path).unwrap_or_else(|_| {
             panic!(
                 "could not create build folder for cmake {}CMakeLists.txt",
                 cmake_parent_path
             )
         });
     }
+
     //set installfolder
     let install_folder_str = format!("{}/{}", build_folder_str, p_cmake_build_type);
 
@@ -371,6 +418,7 @@ fn build_cmake(p_cmake_build_type: &str, p_git_repo_path: &str, p_value: &BuildC
                 cmake_parent_path
             )
         });
+
     if !out.status.success() {
         panic!(
             "Build failed: CMake project was not configured because: {:?}",
@@ -398,6 +446,7 @@ fn build_cmake(p_cmake_build_type: &str, p_git_repo_path: &str, p_value: &BuildC
                 cmake_parent_path
             )
         });
+
     if !out.status.success() {
         panic!(
             "CMake Build failed for {} because: {:?}",
@@ -415,8 +464,10 @@ fn build_make(
 ) {
     //get path to make file
     let make_parent_path = format!("{}/{}", p_git_repo_path, p_value.2);
+
     //check build folder
     let build_folder_str = format!("{}/build", make_parent_path);
+
     //check install folder
     let install_folder_str = format!("{}/{}", build_folder_str, p_make_build_profile);
 
@@ -459,7 +510,10 @@ fn build_make(
 fn make_folder(path: &str) {
     //check folder exists
     let p = Path::new(&path);
+
     if !p.exists() {
-        std::fs::create_dir(p).unwrap_or_else(|_| panic!("could not create folder {}", path));
+        fs::create_dir(p).unwrap_or_else(|_| panic!("could not create folder {}", path));
     }
 }
+
+fn main() {}
